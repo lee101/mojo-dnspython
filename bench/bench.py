@@ -65,11 +65,29 @@ def row(name: str, ours: float, upstream: float) -> str:
     return f"| {name} | {ours * 1e3:.2f} ms | {upstream * 1e3:.2f} ms | {speedup:.2f}x |"
 
 
+def repeat(function, count: int) -> None:
+    for _ in range(count):
+        function()
+
+
 def main() -> None:
     names_wire, offsets = compressed_names(100_000)
     packet = a_record_message(20_000)
+    ordinary_wire = b"\x03www\x07example\x03com\x00"
+    ours_name = mdns.from_text("WWW.Example.COM.")
+    upstream_name = dns.name.from_text("WWW.Example.COM.")
 
     cases = [
+        (
+            "decode one name 20k times",
+            lambda: repeat(lambda: mdns.from_wire(ordinary_wire, 0), 20_000),
+            lambda: repeat(lambda: dns.name.from_wire(ordinary_wire, 0), 20_000),
+        ),
+        (
+            "encode one name 20k times",
+            lambda: repeat(ours_name.to_wire, 20_000),
+            lambda: repeat(upstream_name.to_wire, 20_000),
+        ),
         (
             "decode 100k compressed names",
             lambda: mdns.decode_names(names_wire, offsets),

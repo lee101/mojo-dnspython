@@ -74,19 +74,23 @@ its `Header`, `Question` values, and `Record` envelopes.
 
 ## Benchmarks
 
-Measured with `pixi run bench` on this machine on 2026-07-30: Intel Xeon
+Measured with `pixi run bench` on this machine on 2026-08-24: Intel Xeon
 E5-2697 v4, Linux x86-64, Python 3.13.14, Mojo
-1.0.0b3.dev2026072406. Times are the median of five warm runs.
+1.1.0.dev2026081105. Times are the median of five warm runs.
 
 | case | mojo-dnspython | dnspython 2.8.0 | speedup |
 |---|---:|---:|---:|
-| decode 100k compressed names | 147.71 ms | 1710.63 ms | 11.58x |
-| scan 20k A-record envelopes | 81.73 ms | 1667.98 ms | 20.41x |
+| decode one name 20k times | 132.76 ms | 146.03 ms | 1.10x |
+| encode one name 20k times | 12.21 ms | 20.10 ms | 1.65x |
+| decode 100k compressed names | 148.13 ms | 953.77 ms | 6.44x |
+| scan 20k A-record envelopes | 79.07 ms | 1093.10 ms | 13.82x |
 
-The name benchmark returns equivalent name objects and consumed lengths. The
-message benchmark compares generic envelope scanning with dnspython's full
-typed parser using `one_rr_per_rrset=True`; the Mojo result intentionally does
-less RDATA work, as described in the coverage section.
+The decode benchmarks return equivalent name objects and consumed lengths. The
+encode benchmark measures repeated serialization of an immutable name and
+therefore includes the cached-wire fast path after warmup. The message
+benchmark compares generic envelope scanning with dnspython's full typed parser
+using `one_rr_per_rrset=True`; the Mojo result intentionally does less RDATA
+work, as described in the coverage section.
 
 There is no GPU path. DNS name decoding and envelope scanning are branch-heavy
 byte-processing kernels with arithmetic intensity well below two operations per
@@ -94,11 +98,11 @@ byte moved, so host/device transfer and launch overhead would dominate.
 
 ## How it works
 
-Python owns all memory. Immutable wire bytes are exposed through a NumPy
-`uint8` view, destination buffers are allocated by Python, and their addresses
-cross the C ABI as 64-bit integers. Mojo reconstructs mutable-origin unsafe
-pointers inside four non-parametric exported functions. No allocation or
-Python callback occurs in the native loops.
+Python owns all memory. Immutable wire bytes cross the C ABI directly as
+read-only pointers, while NumPy allocates destination buffers whose addresses
+cross as 64-bit integers. Mojo reconstructs mutable-origin unsafe pointers
+inside four non-parametric exported functions. No allocation or Python callback
+occurs in the native loops.
 
 An expanded name occupies at most 255 bytes in length-prefixed wire form.
 Batch decoding uses fixed 255-byte rows plus three `int64` result values per

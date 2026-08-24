@@ -69,12 +69,11 @@ def scan_message(wire: bytes, *, ignore_trailing: bool = False) -> WireMessage:
     values = [int.from_bytes(wire[index : index + 2], "big") for index in range(0, 12, 2)]
     header = Header(*values)
     total = sum(values[2:])
-    source = np.frombuffer(wire, dtype=np.uint8)
     rows = np.empty((max(total, 1), 8), dtype=np.int64)
     result = np.empty(6, dtype=np.int64)
     lib().mdns_scan_message(
-        address(source),
-        len(source),
+        wire,
+        len(wire),
         address(rows),
         total,
         int(ignore_trailing),

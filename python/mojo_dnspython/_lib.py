@@ -12,12 +12,13 @@ LIB = os.environ.get("MOJO_DNSPYTHON_LIB") or os.path.join(
 )
 
 I = ctypes.c_int64
+WIRE = ctypes.c_char_p
 
 _SIGNATURES = {
-    "mdns_name_decode": ([I, I, I, I, I, I], None),
-    "mdns_names_decode": ([I, I, I, I, I, I, I], None),
+    "mdns_name_decode": ([WIRE, I, I, I, I, I], None),
+    "mdns_names_decode": ([WIRE, I, I, I, I, I, I], None),
     "mdns_name_encode": ([I, I, I, I, I, I], None),
-    "mdns_scan_message": ([I, I, I, I, I, I], None),
+    "mdns_scan_message": ([WIRE, I, I, I, I, I], None),
 }
 
 

@@ -38,6 +38,15 @@ def test_canonical_wire_matches_dnspython():
     assert ours.canonicalize().labels == upstream.canonicalize().labels
 
 
+@pytest.mark.parametrize("label_length", [1, 3, 4, 7, 8, 15, 16, 31, 32, 63])
+def test_canonical_encode_simd_tail_lengths_match_dnspython(label_length):
+    label = bytes(65 + index % 26 for index in range(label_length))
+    ours = mdns.Name((label, b""))
+    upstream = dns.name.Name((label, b""))
+    assert ours.to_wire(canonicalize=True) == upstream.to_wire(canonicalize=True)
+    assert ours.to_wire(canonicalize=True) == upstream.to_wire(canonicalize=True)
+
+
 def test_relative_name_with_origin_matches_dnspython():
     ours = mdns.Name((b"www",))
     ours_origin = mdns.from_text("example.")

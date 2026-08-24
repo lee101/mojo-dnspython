@@ -60,10 +60,6 @@ def _raise_status(status: int) -> None:
     raise error()
 
 
-def _wire_array(message: bytes) -> np.ndarray:
-    return np.frombuffer(message, dtype=np.uint8)
-
-
 def _labels_from_data(data: bytes) -> tuple[bytes, ...]:
     labels: list[bytes] = []
     position = 0
@@ -94,7 +90,14 @@ def _positions_array(offsets: Iterable[int]) -> np.ndarray:
 class Name:
     """A sequence of DNS labels, matching the covered dnspython Name API."""
 
-    __slots__ = ("_labels", "_wire", "_wire_offset", "_wire_length")
+    __slots__ = (
+        "_labels",
+        "_wire",
+        "_wire_offset",
+        "_wire_length",
+        "_wire_cache",
+        "_canonical_wire_cache",
+    )
 
     def __init__(self, labels: Iterable[bytes]):
         converted = tuple(bytes(label) for label in labels)
@@ -109,6 +112,8 @@ class Name:
         self._wire: np.ndarray | None = None
         self._wire_offset = 0
         self._wire_length = 0
+        self._wire_cache: bytes | None = None
+        self._canonical_wire_cache: bytes | None = None
 
     @property
     def labels(self) -> tuple[bytes, ...]:
@@ -193,6 +198,11 @@ class Name:
             labels = self.labels
 
         if file is None:
+            cache_name = "_canonical_wire_cache" if canonicalize else "_wire_cache"
+            if self.is_absolute():
+                cached = getattr(self, cache_name)
+                if cached is not None:
+                    return cached
             raw = b"".join(bytes((len(label),)) + label for label in labels)
             src = np.frombuffer(raw, dtype=np.uint8)
             dst = np.empty(len(raw), dtype=np.uint8)
@@ -207,7 +217,10 @@ class Name:
             )
             if result[0]:
                 _raise_status(int(result[0]))
-            return dst[: int(result[1])].tobytes()
+            encoded = dst[: int(result[1])].tobytes()
+            if self.is_absolute():
+                setattr(self, cache_name, encoded)
+            return encoded
 
         for index, label in enumerate(labels):
             suffix = Name(labels[index:])
@@ -233,6 +246,8 @@ def _name_from_wire_unchecked(
     value._wire = wire
     value._wire_offset = offset
     value._wire_length = length
+    value._wire_cache = None
+    value._canonical_wire_cache = None
     return value
 
 
@@ -308,15 +323,24 @@ def from_text(text: bytes | str, origin: Name | None = root, idna_codec=None) ->
 def _from_wire(message: bytes, current: int, end: int) -> tuple[Name, int]:
     if not 0 <= current < end <= len(message):
         raise FormError
-    source = _wire_array(message)
-    output = np.empty(255, dtype=np.uint8)
-    result = np.empty(3, dtype=np.int64)
+    result_bytes = 3 * np.dtype(np.int64).itemsize
+    output = np.empty(result_bytes + 255, dtype=np.uint8)
+    result = output[:result_bytes].view(np.int64)
+    output_address = address(output)
     lib().mdns_name_decode(
-        address(source), end, current, address(output), len(output), address(result)
+        message,
+        end,
+        current,
+        output_address + result_bytes,
+        255,
+        output_address,
     )
     if result[0]:
         _raise_status(int(result[0]))
-    return _name_from_wire_unchecked(output, 0, int(result[2])), int(result[1])
+    return (
+        _name_from_wire_unchecked(output, result_bytes, int(result[2])),
+        int(result[1]),
+    )
 
 
 def from_wire(message: bytes, current: int) -> tuple[Name, int]:
@@ -341,12 +365,11 @@ def decode_names(message: bytes, offsets: Iterable[int]) -> list[tuple[Name, int
         return []
     if np.any(positions < 0) or np.any(positions >= len(message)):
         raise FormError
-    source = _wire_array(message)
     output = np.empty((len(positions), 255), dtype=np.uint8)
     results = np.empty((len(positions), 3), dtype=np.int64)
     lib().mdns_names_decode(
-        address(source),
-        len(source),
+        message,
+        len(message),
         address(positions),
         len(positions),
         address(output),

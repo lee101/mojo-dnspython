@@ -35,6 +35,25 @@ def _copy_bytes(src: BPtr, dst: BPtr, count: Int):
         i += 1
 
 
+def _lower_copy_bytes(src: BPtr, dst: BPtr, count: Int):
+    var vector_end = count - count % W
+    var i = 0
+    var upper_a = SIMD[DType.uint8, W](UInt8(65))
+    var upper_z = SIMD[DType.uint8, W](UInt8(90))
+    var case_bit = SIMD[DType.uint8, W](UInt8(32))
+    while i < vector_end:
+        var values = src.load[width=W](i)
+        var uppercase = values.ge(upper_a) & values.le(upper_z)
+        dst.store(i, uppercase.select(values + case_bit, values))
+        i += W
+    while i < count:
+        var value = src[i]
+        if value >= UInt8(65) and value <= UInt8(90):
+            value += UInt8(32)
+        dst[i] = value
+        i += 1
+
+
 def _decode_name(
     message: BPtr,
     message_len: Int,
@@ -133,7 +152,7 @@ def mdns_name_decode(
         BPtr(unsafe_from_address=dst_addr),
         capacity,
         True,
-        IPtr(unsafe_from_address=result_addr),
+        result,
     )
 
 
@@ -235,19 +254,17 @@ def mdns_name_encode(
         if count >= 64:
             result[0] = 3
             return
-        dst[pos] = src[pos]
         pos += 1
         if pos + count > src_len:
             return
-        for j in range(count):
-            var value = src[pos + j]
-            if canonicalize != 0 and value >= UInt8(65) and value <= UInt8(90):
-                value += UInt8(32)
-            dst[pos + j] = value
         pos += count
         if count == 0:
             if pos != src_len:
                 return
+            if canonicalize != 0:
+                _lower_copy_bytes(src, dst, src_len)
+            else:
+                _copy_bytes(src, dst, src_len)
             result[0] = 0
             result[1] = Int64(pos)
             return
