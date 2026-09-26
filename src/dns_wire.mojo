@@ -1,13 +1,10 @@
 """DNS wire-format kernels and their C ABI."""
 
-from std.algorithm import map
 from std.sys.info import simd_width_of
 
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
 comptime IPtr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
-comptime PARALLEL_DECODE_THRESHOLD = 4096
-comptime DECODE_CHUNK_SIZE = 1024
 
 
 def _u16(buf: BPtr, pos: Int) -> Int:
@@ -185,7 +182,7 @@ def mdns_names_decode(
     var offsets = IPtr(unsafe_from_address=offsets_addr)
     var dst = BPtr(unsafe_from_address=dst_addr)
 
-    def decode_one(i: Int) capturing:
+    for i in range(count):
         _decode_name(
             message,
             message_len,
@@ -195,28 +192,6 @@ def mdns_names_decode(
             True,
             results + i * 3,
         )
-
-    if count < PARALLEL_DECODE_THRESHOLD:
-        for i in range(count):
-            decode_one(i)
-    else:
-        var chunk_count = (count + DECODE_CHUNK_SIZE - 1) // DECODE_CHUNK_SIZE
-
-        def decode_chunk(chunk: Int) capturing:
-            var start = chunk * DECODE_CHUNK_SIZE
-            var stop = min(start + DECODE_CHUNK_SIZE, count)
-            for i in range(start, stop):
-                _decode_name(
-                    message,
-                    message_len,
-                    Int(offsets[i]),
-                    dst + i * stride,
-                    stride,
-                    True,
-                    results + i * 3,
-                )
-
-        map[decode_chunk](chunk_count)
 
 
 @export("mdns_name_encode")
