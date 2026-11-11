@@ -47,6 +47,63 @@ def test_canonical_encode_simd_tail_lengths_match_dnspython(label_length):
     assert ours.to_wire(canonicalize=True) == upstream.to_wire(canonicalize=True)
 
 
+# The copy kernels tile by `simd_width_of[DType.float64]()` bytes (8 on this
+# target). Cover 0, 1, W-1, W, W+1, large odd lengths, and the 255-byte name
+# limit so the scalar tail loop and the `count < W` path both run.
+_SIMD_W = np.dtype(np.float64).itemsize
+_PATTERN = b"AbCdEfGhWxYz0123456789" * 16
+# Totals of shape sum(len(label) + 1) + 1, so each is a reachable wire name.
+_LABEL_GROUPS = (
+    (),
+    (1,),
+    (_SIMD_W - 2,),
+    (_SIMD_W - 1,),
+    (_SIMD_W,),
+    (61,),
+    (62,),
+    (63,),
+    (62, 63),
+    (63, 62, 62),
+    (63, 63, 63, 61),
+)
+_TOTAL_LENGTHS = tuple(sum(length + 1 for length in group) + 1 for group in _LABEL_GROUPS)
+_LABEL_LENGTHS = (0, 1, _SIMD_W - 1, _SIMD_W, _SIMD_W + 1, 61, 62, 63)
+
+
+def _wire_name_of_length(total: int) -> bytes:
+    """A valid wire name of exactly ``total`` bytes, mixing upper and lower case."""
+    for group in _LABEL_GROUPS:
+        if sum(length + 1 for length in group) + 1 == total:
+            wire = bytearray()
+            for length in group:
+                wire.append(length)
+                wire.extend(_PATTERN[:length])
+            wire.append(0)
+            return bytes(wire)
+    raise AssertionError(f"no label layout produces a {total}-byte name")
+
+
+@pytest.mark.parametrize("total", _TOTAL_LENGTHS)
+def test_encode_copy_kernel_simd_tail_lengths_match_dnspython(total):
+    wire = _wire_name_of_length(total)
+    assert len(wire) == total
+    labels = dns.name.from_wire(wire, 0)[0].labels if total else (b"",)
+    ours = mdns.Name(labels)
+    upstream = dns.name.Name(labels)
+    assert ours.to_wire() == upstream.to_wire()
+    assert ours.to_wire(canonicalize=True) == upstream.to_wire(canonicalize=True)
+
+
+@pytest.mark.parametrize("label_length", _LABEL_LENGTHS)
+def test_canonical_copy_kernel_simd_tail_lengths_match_dnspython(label_length):
+    # A zero-length label is only valid as the final root label.
+    labels = (b"",) if label_length == 0 else (_PATTERN[:label_length], b"")
+    ours = mdns.Name(labels)
+    upstream = dns.name.Name(labels)
+    assert ours.to_wire() == upstream.to_wire()
+    assert ours.to_wire(canonicalize=True) == upstream.to_wire(canonicalize=True)
+
+
 def test_relative_name_with_origin_matches_dnspython():
     ours = mdns.Name((b"www",))
     ours_origin = mdns.from_text("example.")

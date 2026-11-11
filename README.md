@@ -100,6 +100,51 @@ benchmark compares generic envelope scanning with dnspython's full typed parser
 using `one_rr_per_rrset=True`; the Mojo result intentionally does less RDATA
 work, as described in the coverage section.
 
+### SIMD phase: evaluated, not adopted
+
+An earlier SIMD pass was audited against `pixi run bench` at the caller sizes the
+harness uses. Nothing reached the bar in the task brief ("keep only what
+`pixi run bench` shows is faster at real caller sizes"), so **no kernel change from
+that pass remains in the tree**. The measurements, so the next pass need not repeat
+them:
+
+| candidate | measured | verdict |
+|---|---|---|
+| `_copy_bytes` / `_lower_copy_bytes` at DNS lengths (7-255 B) | 1.24-1.36 us/call for both the current `W=8` body and a `simd_width_of[DType.uint8]` (`W=16`) body | flat, within 1-3% noise |
+| same kernels, large contiguous buffers (4 KB-1 MB) | W=16 is 1.26x (copy) and 1.68-3.37x (case-fold) faster | real, but no caller reaches these sizes |
+| fuse the case-fold compare/select into a single store pass | 0.99-1.02x vs current | no gain; the one-store-per-tile form is already what the kernel emits |
+| `decode_names` / `scan_message` end to end | native kernels are 3.1 ms of a 117 ms call and 0.3 ms of a 73 ms call; 80 ms of the first is building 100k `Name` objects, 57 ms of the second is per-row `Record`/`Question` construction | the hot loops are object construction, not contiguous elementwise work |
+
+The copy loops are already the only contiguous elementwise loops in the port, and
+their real call sites are label-sized. `_copy_bytes` receives one label at a time
+(7 bytes for the 100k-name benchmark, matching the sweep above); `_lower_copy_bytes`
+receives the whole name (18 bytes for `WWW.Example.COM.`, 63 bytes for a maximal
+label). Widening those kernels is a measurable win on large buffers and a
+non-measurable one on real DNS messages, so the `W=8` bodies were kept.
+
+The before/after numbers for this non-change are the same binary. The committed
+`src/` was restored byte-for-byte before the final run, so the "after" column below
+is the unchanged code, and its spread against the earlier "before" column is
+run-to-run noise on this host, not a regression:
+
+| case | before (table above) | after SIMD audit (source unchanged) | dnspython 2.8.0 |
+|---|---:|---:|---:|
+| decode one name 20k times | 139.30 ms | 145.08 ms | 145.61 ms |
+| encode one name 20k times | 12.57 ms | 11.54 ms | 19.17 ms |
+| decode 100k compressed names | 124.02 ms | 122.96 ms | 1092.00 ms |
+| scan 20k A-record envelopes | 73.13 ms | 74.86 ms | 1081.31 ms |
+
+Tail coverage for the copy kernels now lives in `tests/test_name_parity.py`:
+`test_encode_copy_kernel_simd_tail_lengths_match_dnspython` and
+`test_canonical_copy_kernel_simd_tail_lengths_match_dnspython` cover 0, 1, W-1, W,
+W+1, a maximal 255-byte name and 63-byte labels. Breaking only the scalar tail of
+either kernel fails 30 of them.
+
+The same findings apply to fusion: `_copy_bytes` and `_lower_copy_bytes` are already
+single-stage (one load, one store per tile), and the two adjacent passes that read
+the same data in `decode_names` and `scan_message` are Python object construction,
+which cannot be fused into a SIMD pass or replaced by one.
+
 There is no GPU path. DNS name decoding and envelope scanning are branch-heavy
 byte-processing kernels with arithmetic intensity well below two operations per
 byte moved, so host/device transfer and launch overhead would dominate.
