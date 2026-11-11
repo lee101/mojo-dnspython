@@ -145,9 +145,79 @@ single-stage (one load, one store per tile), and the two adjacent passes that re
 the same data in `decode_names` and `scan_message` are Python object construction,
 which cannot be fused into a SIMD pass or replaced by one.
 
-There is no GPU path. DNS name decoding and envelope scanning are branch-heavy
-byte-processing kernels with arithmetic intensity well below two operations per
-byte moved, so host/device transfer and launch overhead would dominate.
+### GPU phase: not started, gate failed (CPU only: memory-bound)
+
+The GPU gate in the phase brief requires, in order: a candidate kernel above
+roughly 2 flops per byte in `bench/analysis.md`, then at least 4000 MiB free on
+the shared device. **`bench/analysis.md` does not exist in this repository** (it
+is absent from every commit and from the working tree), so that gate could not be
+applied from the named file. Rather than guess, arithmetic intensity here is
+derived from the kernels in `src/dns_wire.mojo` and the exact inputs `bench/bench.py`
+generates, which are reproducible with `pixi run python`. Note that the inputs are
+what make the intensity small: the intensity itself is fixed per byte.
+
+| kernel | caller size | bytes moved per element | work per element | intensity |
+|---|---|---|---|---|
+| `mdns_name_decode` / `mdns_names_decode` (`_decode_name`) | 7-byte label + 2-byte pointer, 100k names | 10 B in + 24 B result row | ~32 integer ops: bounds checks, label-length clamp, pointer decode, backward/loop check, terminator write | 0.94 op/B |
+| `mdns_scan_message` | 16 B per A record, 20k RRs | 16 B in + 24 B written per row (the other row fields are not written) | ~30 integer ops: owner-pointer decode, `_u16`/`_u32` field reassembly, 3 row stores | 0.75 op/B |
+| `_copy_bytes` / `_lower_copy_bytes` (`mdns_name_encode`) | 18 B name | 2 B (1 load, 1 store) | 4 `uint8` compares/adds/select per tile | 2.00 op/B |
+
+The two kernels that carry real caller traffic are below the bar by the brief's own
+gate, and there is no floating point anywhere in the port: every kernel is integer
+and branch-based. Even the best case, the case-fold body at 2.0 op/B, is a single
+bytewise pass that pays nothing less on a GPU than a copy: it would win only on
+transfer cost, which is the thing the gate exists to exclude. The decode kernel is
+worse than these counts suggest, because its inner loop walks a pointer chain whose
+target address is data-dependent, so it is fully serial within a name; a GPU launch
+would need one thread per name with a 64-branch divergent body.
+
+**Decision: no GPU path is added. These kernels are CPU only: memory-bound.** No
+kernel changes, no new tests, and no device allocation were made; `src/` and the
+Python package are unchanged and the GPU tests were not written, so **the GPU tests
+were skipped** (there are none to run) rather than failing on a host without a
+device. The CPU path remains the only path.
+
+For completeness of the gate record, the shared device was checked
+(`nvidia-smi --query-gpu=memory.free --format=csv,noheader`): an NVIDIA GeForce
+RTX 5090 reported 5294 MiB free, above the 4000 MiB floor, so **memory was not the
+binding constraint; arithmetic intensity was.** The device is shared, which is also
+why no allocation above 2 GB would be made even if a candidate had passed.
+
+**This toolchain cannot compile GPU code from this repository today, independently
+of the gate.** `pixi.toml` pins `mojo` only; the `max` package that ships
+`max.mojoc` (`MOJO_NOTES.md` section 5b) is not a dependency. A minimal probe also
+confirms it:
+
+```text
+/tmp/gpuprobe.mojo:1:10: error: 'gpu' does not refer to a nested package
+from max.gpu.host import DeviceContext
+```
+
+So `from max.gpu.host import DeviceContext` and `from max.gpu import block_idx,
+thread_idx` do not resolve in this environment. That is the same missing-package
+failure that blocks `parallelize` in the parallel phase, and it means any GPU work
+here would first need `max ==26.7.0.dev2026092605` added beside the mojo pin, a new
+lockfile, and the `max` runtime in the shared library. It is recorded so the next
+pass does not rediscover it, not as the reason for the decision: the gate failed
+before this mattered.
+
+**Before and after numbers: none, because no code changed.** The "after" build is
+byte-identical to the "before" build, so any before/after table would be two
+columns of run-to-run noise. For context, the kernel that a GPU path would have had
+to beat, measured through the same ctypes path the package uses on this host,
+is `decode_names(wire, offsets)` over 100,000 compressed names at **109.5 ms**
+end-to-end, of which the README's SIMD and parallel audits put about 3.1 ms in the
+native kernel and the rest in building 100k `Name` objects. A device copy of the
+1.0 MB message would cost more than the native kernel it replaces, and the CPU path
+would still be needed for the object construction.
+
+**For the next pass.** Re-run this gate only if a real workload arrives whose
+per-element arithmetic intensity is above 2 flops per byte and whose transfer is
+amortized, for example a batch of many messages in one buffer, or DNSSEC
+verification (elliptic-curve arithmetic, which is genuinely compute-heavy). Batch
+message scanning in one native call, as suggested by the parallel phase, would
+help both phases. `bench/analysis.md` should be generated alongside `bench/bench.py`
+so that the flops-per-byte gate has a file to read.
 
 ### PARALLEL phase: evaluated, not adopted
 
