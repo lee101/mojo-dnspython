@@ -149,6 +149,95 @@ There is no GPU path. DNS name decoding and envelope scanning are branch-heavy
 byte-processing kernels with arithmetic intensity well below two operations per
 byte moved, so host/device transfer and launch overhead would dominate.
 
+### PARALLEL phase: evaluated, not adopted
+
+A parallel path was built, measured and removed. It is not in the tree; `src/`
+is byte-identical to the previous commit.
+
+**What was built.** `mdns_names_decode` grew a `parallelize` branch from
+`max.algorithm` (the only form that compiles on this toolchain) for counts above
+a size threshold, with an explicit worker count capped at 4 and one strided
+destination row plus one results triple per work item, so the output does not
+depend on scheduling order. `decode_names` gained a `workers=` keyword for the
+sweep. Tests confirmed the parallel output matched serial at 1, 2 and 4 workers
+for 8k and 100k names, matched dnspython 2.8.0, and raised the same exception
+class on a malformed batch.
+
+**Why it was removed.** This toolchain's `parallelize` does not reuse a pool
+across calls, so each call pays worker startup. A trivial body that stores one
+`Int64` per item costs about 5 ms at 2 workers on this host (72 CPUs, shared,
+load 14-25) and nothing at 1 worker. Batch name decoding is far too little work
+per call to carry that. Native `mdns_names_decode` only, parallel build, median
+of five, via the same ctypes path the package uses:
+
+| names | 1 worker | 2 workers | 4 workers |
+|---|---:|---:|---:|
+| 8,000 | 0.314 ms | 14.532 ms | 11.727 ms |
+| 16,000 | 0.567 ms | 11.857 ms | 11.058 ms |
+| 32,000 | 0.896 ms | 12.902 ms | 12.053 ms |
+| 100,000 | 4.687 ms | 16.854 ms | 15.881 ms |
+
+The crossover is nowhere near a realistic caller. The sweep that decided the
+threshold, end to end through `decode_names`, serial build for the 1-worker
+column and parallel build for the rest (`bench/parallel_sweep.py`):
+
+| names | 1 worker (serial build) | 2 workers | 4 workers |
+|---|---:|---:|---:|
+| 128 | 0.139 ms | 0.148 ms | 0.146 ms |
+| 512 | 0.376 ms | 0.380 ms | 0.411 ms |
+| 1,000 | 0.806 ms | 1.190 ms | 0.662 ms |
+| 2,000 | 1.570 ms | 1.467 ms | 1.626 ms |
+| 4,000 | 3.485 ms | 3.392 ms | 3.425 ms |
+| 8,000 | 6.243 ms | 19.864 ms | 19.020 ms |
+| 16,000 | 15.605 ms | 25.419 ms | 27.571 ms |
+| 32,000 | 31.488 ms | 46.181 ms | 44.902 ms |
+| 100,000 | 108.445 ms | 133.257 ms | 114.897 ms |
+
+Sizes below 8,000 are under the temporary threshold, so they run the same serial
+code in both builds and the spread there is noise. At and above it, 4 workers
+lose by 1.06x at the largest size and by 3.0x at 8,000 names. At 1, 2 and 4
+workers the gain never flattens and reverses the way a working parallel path
+would: it is overhead-dominated from the first parallel call. Two workers were
+never better than one, and the extra worker count only ever hurt, which is the
+opposite of a scaling curve and the reason the cap never came into play.
+
+"More names" does not rescue it either: the measured columns show the parallel
+time flat at 11-16 ms from 8,000 names to 100,000 while the serial kernel grows
+from 0.3 ms to 4.7 ms, so launch overhead alone is several times the entire
+serial kernel even at the largest size measured. The Python layer that turns rows
+into `Name` objects is linear on top of that. A parallel path loses at every size a caller can reach through this API.
+
+**End to end, on the real benchmark.** Three interleaved rounds of `bench/bench.py`
+under the bench lock, serial build and parallel-threshold-at-0 build built from
+the same source (the parallel one also carries the `max` runtime, 58,040 bytes
+against 15,432 for the serial library):
+
+| case | serial build (3 rounds) | parallel build (3 rounds) | dnspython 2.8.0 |
+|---|---|---|---|
+| decode one name 20k times | 133.24 / 140.71 / 134.65 ms | 135.68 / 145.63 / 169.39 ms | 169.39 / 150.46 / 155.80 ms |
+| encode one name 20k times | 13.99 / 12.40 / 11.30 ms | 12.47 / 12.64 / 12.09 ms | 23.24 / 21.02 / 19.65 ms |
+| decode 100k compressed names | 127.41 / 114.35 / 115.92 ms | 129.92 / 115.66 / 122.36 ms | 995.26 / 999.06 / 956.97 ms |
+| scan 20k A-record envelopes | 73.62 / 77.12 / 71.05 ms | 81.90 / 85.29 / 90.03 ms | 1049.68 / 1104.96 / 1030.34 ms |
+
+The 100k decode case is a wash (serial 114-127 ms, parallel 116-130 ms) because
+that is the size where the native kernel's own gain is real but small and the
+per-call launch cost cancels it. The scan case is the one that should have
+benefited most: `scan_message` decodes 20k owner names through the same batch
+call. It got 8-19 ms slower in every round, for the same launch reason. A
+parallel path that is neutral at the benchmark size and slower where it should
+help is worse than no parallelism, so it was reverted.
+
+**What did not change.** `src/dns_wire.mojo` and the Python package are untouched,
+so `pixi.toml`/`pixi.lock` are also unchanged (no `max` dependency). The `before`
+and `after` binaries are the same serial build; the table above is the evidence
+for that, with the run-to-run spread on this shared host showing the noise floor.
+
+**For the next pass.** The blocker is per-call launch cost, not chunking or
+worker count. Re-test this with a `parallelize` that reuses a pool across calls,
+or by batching many messages into one native call so the launch is amortized; do
+not just re-raise the threshold. `bench/parallel_sweep.py` reproduces the sweep
+once a parallel build and the `workers=` keyword exist again.
+
 ## How it works
 
 Python owns all memory. Immutable wire bytes cross the C ABI directly as
