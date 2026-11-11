@@ -74,16 +74,24 @@ its `Header`, `Question` values, and `Record` envelopes.
 
 ## Benchmarks
 
-Measured with `pixi run bench` on this machine on 2026-08-24: Intel Xeon
-E5-2697 v4, Linux x86-64, Python 3.13.14, Mojo
-1.1.0.dev2026081105. Times are the median of five warm runs.
+Measured with `pixi run bench` on this machine: Intel Xeon E5-2697 v4, Linux
+x86-64, Python 3.13.14, Mojo 1.2.0.dev2026092605. Times are the median of five
+warm runs. "Before" is the same harness on the same machine immediately prior to
+the loop changes below.
 
-| case | mojo-dnspython | dnspython 2.8.0 | speedup |
-|---|---:|---:|---:|
-| decode one name 20k times | 132.76 ms | 146.03 ms | 1.10x |
-| encode one name 20k times | 12.21 ms | 20.10 ms | 1.65x |
-| decode 100k compressed names | 148.13 ms | 953.77 ms | 6.44x |
-| scan 20k A-record envelopes | 79.07 ms | 1093.10 ms | 13.82x |
+| case | before | after | dnspython 2.8.0 | speedup |
+|---|---:|---:|---:|---:|
+| decode one name 20k times | 128.14 ms | 126.23 ms | 158.04 ms | 1.25x |
+| encode one name 20k times | 12.19 ms | 12.08 ms | 19.73 ms | 1.63x |
+| decode 100k compressed names | 156.66 ms | 110.33 ms | 988.14 ms | 8.96x |
+| scan 20k A-record envelopes | 81.21 ms | 73.44 ms | 1099.47 ms | 14.97x |
+
+The batch decode change replaces per-element NumPy scalar reads with one
+`tolist()` conversion per result column, so the Python loop that builds the
+returned `(Name, consumed)` pairs no longer crosses the NumPy indexing path
+100k times. It does not use multi-accumulator or reordered floating-point sums:
+every kernel here is integer and branch-based, so results are bit-for-bit
+unchanged.
 
 The decode benchmarks return equivalent name objects and consumed lengths. The
 encode benchmark measures repeated serialization of an immutable name and

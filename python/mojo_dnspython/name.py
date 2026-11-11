@@ -54,6 +54,9 @@ _STATUS_ERRORS = {
     4: NameTooLong,
 }
 
+# An expanded name is at most 255 bytes in length-prefixed wire form.
+_NAME_CAPACITY = 255
+
 
 def _raise_status(status: int) -> None:
     error = _STATUS_ERRORS.get(status, ValueError)
@@ -365,7 +368,7 @@ def decode_names(message: bytes, offsets: Iterable[int]) -> list[tuple[Name, int
         return []
     if np.any(positions < 0) or np.any(positions >= len(message)):
         raise FormError
-    output = np.empty((len(positions), 255), dtype=np.uint8)
+    output = np.empty((len(positions), _NAME_CAPACITY), dtype=np.uint8)
     results = np.empty((len(positions), 3), dtype=np.int64)
     lib().mdns_names_decode(
         message,
@@ -379,13 +382,13 @@ def decode_names(message: bytes, offsets: Iterable[int]) -> list[tuple[Name, int
     failures = np.flatnonzero(results[:, 0])
     if len(failures):
         _raise_status(int(results[int(failures[0]), 0]))
+    consumed = results[:, 1].tolist()
+    lengths = results[:, 2].tolist()
     stride = output.shape[1]
     return [
         (
-            _name_from_wire_unchecked(
-                output, index * stride, int(results[index, 2])
-            ),
-            int(results[index, 1]),
+            _name_from_wire_unchecked(output, index * stride, lengths[index]),
+            consumed[index],
         )
         for index in range(len(positions))
     ]
