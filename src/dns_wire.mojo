@@ -24,7 +24,7 @@ def _copy_bytes(src: BPtr, dst: BPtr, count: Int):
     var vector_end = count - count % W
     var i = 0
     while i < vector_end:
-        var values = src.load[width=W](i)
+        var values = src.unsafe_load[width=W](i)
         dst.store(i, values)
         i += W
     while i < count:
@@ -39,7 +39,7 @@ def _lower_copy_bytes(src: BPtr, dst: BPtr, count: Int):
     var upper_z = SIMD[DType.uint8, W](UInt8(90))
     var case_bit = SIMD[DType.uint8, W](UInt8(32))
     while i < vector_end:
-        var values = src.load[width=W](i)
+        var values = src.unsafe_load[width=W](i)
         var uppercase = values.ge(upper_a) & values.le(upper_z)
         dst.store(i, uppercase.select(values + case_bit, values))
         i += W
